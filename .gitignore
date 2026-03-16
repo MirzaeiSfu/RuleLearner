@@ -1,0 +1,4 @@
+*.class
+*.bak
+_*.sql
+.DS_Store
