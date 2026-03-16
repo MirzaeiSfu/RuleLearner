@@ -82,6 +82,9 @@ import ca.sfu.cs.factorbase.database.MySQLFactorBaseDataBase;
  * Finds conditional probabilities for the Bayes net parameters. Also computes log-likelihood and other scores for each node.
  */
 public class CP {
+    private static final String PROBABILITY_SQL_TYPE = "DOUBLE";
+    private static final String SCORE_SQL_TYPE = "DOUBLE";
+
     static Connection con1;
     // to be read from config
     static String databaseName;
@@ -401,7 +404,7 @@ public class CP {
         st.execute(
             "CREATE TABLE `" + tableName + "` (" +
                 "`" + nodeName + "` VARCHAR(200) NOT NULL, " +
-                "CP FLOAT(7,6), " +
+                "CP " + PROBABILITY_SQL_TYPE + ", " +
                 "MULT DECIMAL(65), " +
                 "local_mult DECIMAL(65)" +
             ");"
@@ -449,7 +452,7 @@ public class CP {
             st2.execute(sql3);
             st2.execute(
                 "UPDATE `" + tableName + "` " +
-                "SET CP = MULT / " + mydeno + " " +
+                "SET CP = CASE WHEN " + mydeno + " > 0 THEN MULT / " + mydeno + " ELSE NULL END " +
                 "WHERE `" + nodeName + "` = '" + column_value.get(i) + "';"
             );
 
@@ -477,11 +480,11 @@ public class CP {
 
         st2.execute(
             "ALTER TABLE `" + tableName + "` " +
-            "ADD likelihood FLOAT(20,2);"
+            "ADD likelihood " + SCORE_SQL_TYPE + ";"
         );
         st2.execute(
             "UPDATE `" + tableName + "` " +
-            "SET likelihood = LOG(CP) * local_mult;" // Dec 2nd, likelihood = log(cp) * mult.
+            "SET likelihood = CASE WHEN CP > 0 THEN LOG(CP) * local_mult ELSE NULL END;" // Dec 2nd, likelihood = log(cp) * mult.
         );
         // LOG10() Return the base-10 logarithm of the argument LOG2() Return the base-2 logarithm of the argument //
         // LOG() Return the natural logarithm of the first argument
@@ -521,7 +524,7 @@ public class CP {
         // compute the prior June 23, 2014, zqian
         st.execute(
             "ALTER TABLE `" + tableName + "` " +
-            "ADD prior FLOAT(7,6);"
+            "ADD prior " + PROBABILITY_SQL_TYPE + ";"
         );
         st.execute(
             "UPDATE `" + tableName + "` " +
@@ -703,15 +706,14 @@ public class CP {
 
         st.execute(
             "ALTER TABLE " + escapedTableName + " " +
-            "ADD CP FLOAT(7, 6);"
+            "ADD CP " + PROBABILITY_SQL_TYPE + ";"
         );
-        // Our resolution is only up to 6 digits. This is mainly to help with exporting to BIF format later.
         st.execute(
             "ALTER TABLE " + escapedTableName + " " +
-            "ADD likelihood FLOAT(20,2);"
+            "ADD likelihood " + SCORE_SQL_TYPE + ";"
         );
 
-        st.execute("UPDATE " + escapedTableName + " SET CP = MULT / ParentSum;");
+        st.execute("UPDATE " + escapedTableName + " SET CP = CASE WHEN ParentSum > 0 THEN MULT / ParentSum ELSE NULL END;");
 
 //        st.execute("update " + table_name + " set likelihood = log(CP) * mult;"); // Nov 29, likelihood = log(cp) * mult
 
@@ -735,8 +737,8 @@ public class CP {
           //  String sql = "UPDATE " + escapedTableName + " SET local_mult = MULT / " + local + ";"; OS Dec 5 make local_mult = mult
             st1.execute(sql);
         }
-        logger.fine("UPDATE " + escapedTableName + " SET likelihood = LOG(CP) * local_mult;");
-        st.execute("UPDATE " + escapedTableName + " SET likelihood = LOG(CP) * local_mult;");
+        logger.fine("UPDATE " + escapedTableName + " SET likelihood = CASE WHEN CP > 0 THEN LOG(CP) * local_mult ELSE NULL END;");
+        st.execute("UPDATE " + escapedTableName + " SET likelihood = CASE WHEN CP > 0 THEN LOG(CP) * local_mult ELSE NULL END;");
         st.execute("drop table if exists temp;");
 
         // Next, compute scores for each node.
@@ -776,7 +778,7 @@ public class CP {
         // Compute the prior June 23, 2014, zqian
         st.execute(
             "ALTER TABLE " + escapedTableName + " " +
-            "ADD prior FLOAT(7,6);"
+            "ADD prior " + PROBABILITY_SQL_TYPE + ";"
         );
         ResultSet rst1 = st.executeQuery(
             "SELECT SUM(local_mult) " +
