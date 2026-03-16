@@ -1,0 +1,64 @@
+<?xml version="1.0"?>
+<!-- DTD for the XMLBIF 0.3 format -->
+<!DOCTYPE BIF [
+	<!ELEMENT BIF ( NETWORK )*>
+		<!ATTLIST BIF VERSION CDATA #REQUIRED>
+	<!ELEMENT NETWORK ( NAME, ( PROPERTY | VARIABLE | DEFINITION )* )>
+	<!ELEMENT NAME (#PCDATA)>
+	<!ELEMENT VARIABLE ( NAME, ( OUTCOME |  PROPERTY )* ) >
+		<!ATTLIST VARIABLE TYPE (nature|decision|utility) "nature">
+	<!ELEMENT OUTCOME (#PCDATA)>
+	<!ELEMENT DEFINITION ( FOR | GIVEN | TABLE | PROPERTY )* >
+	<!ELEMENT FOR (#PCDATA)>
+	<!ELEMENT GIVEN (#PCDATA)>
+	<!ELEMENT TABLE (#PCDATA)>
+	<!ELEMENT PROPERTY (#PCDATA)>
+]>
+
+<BIF VERSION="0.3">
+<NETWORK>
+<NAME>edges(nodes0,nodes1)</NAME>
+<VARIABLE TYPE="nature">
+	<NAME>atom_type(nodes0)</NAME>
+</VARIABLE>
+<VARIABLE TYPE="nature">
+	<NAME>atom_type(nodes1)</NAME>
+</VARIABLE>
+<VARIABLE TYPE="nature">
+	<NAME>bond_type(nodes0,nodes1)</NAME>
+</VARIABLE>
+<VARIABLE TYPE="nature">
+	<NAME>edges(nodes0,nodes1)</NAME>
+</VARIABLE>
+<VARIABLE TYPE="nature">
+	<NAME>num_hydrogens(nodes0)</NAME>
+</VARIABLE>
+<VARIABLE TYPE="nature">
+	<NAME>num_hydrogens(nodes1)</NAME>
+</VARIABLE>
+<DEFINITION>
+	<FOR>atom_type(nodes0)</FOR>
+	<GIVEN>atom_type(nodes1)</GIVEN>
+	<GIVEN>bond_type(nodes0,nodes1)</GIVEN>
+	<GIVEN>num_hydrogens(nodes1)</GIVEN>
+</DEFINITION>
+<DEFINITION>
+	<FOR>bond_type(nodes0,nodes1)</FOR>
+	<GIVEN>atom_type(nodes1)</GIVEN>
+	<GIVEN>edges(nodes0,nodes1)</GIVEN>
+	<GIVEN>num_hydrogens(nodes1)</GIVEN>
+</DEFINITION>
+<DEFINITION>
+	<FOR>edges(nodes0,nodes1)</FOR>
+	<GIVEN>atom_type(nodes1)</GIVEN>
+	<GIVEN>num_hydrogens(nodes1)</GIVEN>
+</DEFINITION>
+<DEFINITION>
+	<FOR>num_hydrogens(nodes0)</FOR>
+	<GIVEN>atom_type(nodes0)</GIVEN>
+	<GIVEN>atom_type(nodes1)</GIVEN>
+	<GIVEN>bond_type(nodes0,nodes1)</GIVEN>
+	<GIVEN>num_hydrogens(nodes1)</GIVEN>
+</DEFINITION>
+</NETWORK>
+</BIF>
