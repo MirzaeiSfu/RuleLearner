@@ -2,3 +2,7 @@
 *.bak
 _*.sql
 .DS_Store
+__pycache__/
+*.pyc
+*.pyo
+.venv/

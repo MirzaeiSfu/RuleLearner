@@ -12,6 +12,7 @@
     <module>common</module>
     <module>componentsrunner</module>
     <module>factorbase</module>
+    <module>bnrunner</module>
     <module>mlnexporter</module>
   </modules>
 </project>
