@@ -14,6 +14,16 @@ def _strip_block_comments(sql_text: str) -> str:
     return re.sub(r"/\*.*?\*/", "", sql_text, flags=re.DOTALL)
 
 
+def _strip_line_comments(sql_text: str) -> str:
+    cleaned_lines: list[str] = []
+    for line in sql_text.splitlines():
+        stripped = line.lstrip()
+        if stripped.startswith("--") or stripped.startswith("#"):
+            continue
+        cleaned_lines.append(line)
+    return "\n".join(cleaned_lines)
+
+
 def _split_statements(sql_text: str, delimiter: str) -> list[str]:
     statements: list[str] = []
     current: list[str] = []
@@ -65,6 +75,7 @@ def execute_sql_script(
     sql_text = sql_text.replace("@database@", database_name)
     sql_text = sql_text.replace("@dbcollation@", database_collation)
     sql_text = _strip_block_comments(sql_text)
+    sql_text = _strip_line_comments(sql_text)
 
     statements = _split_statements(sql_text, delimiter=delimiter)
 

@@ -14,6 +14,14 @@ def run_bn_learner(
     forbidden_edges: Path | None = None,
     java_bin: str = "java",
 ) -> None:
+    if not jar_path.exists():
+        raise FileNotFoundError(
+            (
+                f"BN learner jar not found at '{jar_path}'. "
+                "Build it with: bash python_factorbase/scripts/build_bn_learner_jar.sh"
+            )
+        )
+
     command = [
         java_bin,
         "-jar",
@@ -35,4 +43,3 @@ def run_bn_learner(
         command.extend(["--forbidden-edges", str(forbidden_edges)])
 
     subprocess.run(command, check=True)
-
