@@ -6,3 +6,11 @@ __pycache__/
 *.pyc
 *.pyo
 .venv/
+
+# Local experiment/run artifacts
+/11.jar
+/Bif_*.xml
+/dag_.txt
+/cmp*/
+/pygridcmp*/
+/python_factorbase/jars/
