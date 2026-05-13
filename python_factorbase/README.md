@@ -26,11 +26,12 @@ So the learner path is the FactorBase-integrated/modified path (SFU wrapper + lo
 1. Step 1 (`setup`): metadata + setup SQL pipeline in Python.
 2. Step 2 (`fmt`): FMT bootstrap stored procedures in Python.
 3. Step 3 (`bn-learn`): call standalone Java BN learner jar from Python.
+4. Counterpart mode (`factorbase-counterpart` / `pyfactorbase.py`): run the Java-like FactorBase flow in Python, including structure learning, parameter learning, optional KLD generation, and BIF export.
 
 ## Full counterpart mode (config-driven)
 
-For a jar-like run that reads dataset/db names from `config.cfg` and writes FactorBase-style
-BN tables (`Path_BayesNets`, `Final_Path_BayesNets`), use:
+For a jar-like run that reads dataset/db names from `config.cfg` and follows the Java
+FactorBase phase order, use:
 
 ```bash
 python python_factorbase/pyfactorbase.py -Dconfig=config.cfg -jarlearner code/bnrunner/target/bnrunner-1.0-SNAPSHOT.jar
@@ -41,6 +42,14 @@ Equivalent CLI subcommand:
 ```bash
 python python_factorbase/run.py -Dconfig=config.cfg factorbase-counterpart -jarlearner code/bnrunner/target/bnrunner-1.0-SNAPSHOT.jar
 ```
+
+This counterpart flow now:
+
+- learns `Entity_BayesNets`, `Path_BayesNets`, and `Final_Path_BayesNets`
+- exports structure BIF files under `<dbname>/res/`
+- computes CP / score tables in `<dbname>_BN`
+- runs KLD generation when `ComputeKLD=1`
+- writes the final parameterized BIF to `Bif_<dbname>.xml`
 
 ## Install Python dependency
 
@@ -89,8 +98,8 @@ The script writes comparison artifacts under:
 
 including `summary.txt`, exported CT TSV files, and learned edge TSV files.
 For the Python-side output, use the full counterpart command (`pyfactorbase.py`) so
-the Python run writes learned structure into:
-`<dbname>_BN.Path_BayesNets` and `<dbname>_BN.Final_Path_BayesNets`.
+the Python run follows the Java-like database flow and writes learned structure,
+parameter tables, and BIF outputs.
 
 ## 3-line demo (hardcoded unielwin)
 
@@ -157,16 +166,7 @@ python python_factorbase/run.py --config config.cfg setup-and-fmt-and-bn-learn \
   --output-edges /path/to/output_edges.tsv
 ```
 
-Or run setup + FMT + auto-export largest CT + BN learner in one command:
-
-```bash
-python python_factorbase/run.py -Dconfig=config.cfg setup-and-fmt-and-auto-bn-learn \
-  -jarlearner code/bnrunner/target/bnrunner-1.0-SNAPSHOT.jar \
-  --output-edges compare_runs/latest/python_edges.tsv \
-  --ct-tsv compare_runs/latest/python_largest_ct.tsv
-```
-
-For full FactorBase-like structure output in DB tables, prefer:
+For the full Java-like counterpart flow, prefer:
 
 ```bash
 python python_factorbase/run.py -Dconfig=config.cfg factorbase-counterpart \

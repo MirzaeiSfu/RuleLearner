@@ -14,6 +14,10 @@ class SourceSchemaError(RuntimeError):
     """Raised when the source schema is incompatible with FactorBase expectations."""
 
 
+def quote_identifier(identifier: str) -> str:
+    return "`" + identifier.replace("`", "``") + "`"
+
+
 def connect(config: FBConfig, database: Optional[str] = None) -> MySQLConnection:
     import mysql.connector
 
@@ -29,7 +33,7 @@ def connect(config: FBConfig, database: Optional[str] = None) -> MySQLConnection
 
 def use_database(connection: MySQLConnection, database_name: str) -> None:
     with connection.cursor() as cursor:
-        cursor.execute(f"USE `{database_name}`;")
+        cursor.execute(f"USE {quote_identifier(database_name)};")
     connection.commit()
 
 

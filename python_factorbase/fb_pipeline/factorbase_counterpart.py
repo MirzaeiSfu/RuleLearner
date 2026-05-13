@@ -5,19 +5,17 @@ import tempfile
 from pathlib import Path
 
 from .bn_client import run_bn_learner
+from .bif_export import create_final_path_bayesnets, export_structure_bifs, generate_parameter_bif
 from .config import FBConfig
-from .db import connect, use_database
+from .db import connect, quote_identifier, use_database
 from .fmt_pipeline import FMTPipeline
+from .parameter_learning import run_parameter_learning
 from .setup_pipeline import SetupPipeline
 from .sql_runner import execute_sql_script
 
 
-def _quote_identifier(identifier: str) -> str:
-    return "`" + identifier.replace("`", "``") + "`"
-
-
 def _table_row_count(connection, schema_name: str, table_name: str) -> int:
-    query = f"SELECT COUNT(*) FROM {_quote_identifier(schema_name)}.{_quote_identifier(table_name)}"
+    query = f"SELECT COUNT(*) FROM {quote_identifier(schema_name)}.{quote_identifier(table_name)}"
     with connection.cursor() as cursor:
         cursor.execute(query)
         row = cursor.fetchone()
@@ -44,7 +42,7 @@ def _export_table_to_tsv(
     where_clause: str = "MULT > 0",
 ) -> None:
     output_tsv.parent.mkdir(parents=True, exist_ok=True)
-    query = f"SELECT * FROM {_quote_identifier(schema_name)}.{_quote_identifier(table_name)}"
+    query = f"SELECT * FROM {quote_identifier(schema_name)}.{quote_identifier(table_name)}"
     if where_clause:
         query += f" WHERE {where_clause}"
 
@@ -128,7 +126,7 @@ def _insert_entity_edges(connection, config: FBConfig, pvid: str, edges: list[tu
     if not edges:
         return
     query = (
-        f"INSERT IGNORE INTO {_quote_identifier(config.bn_db)}.Entity_BayesNets "
+        f"INSERT IGNORE INTO {quote_identifier(config.bn_db)}.Entity_BayesNets "
         "(pvid, child, parent) VALUES (%s, %s, %s)"
     )
     payload = [(pvid, child, parent) for parent, child in edges]
@@ -141,7 +139,7 @@ def _insert_path_edges(connection, config: FBConfig, rchain_id: str, edges: list
     if not edges:
         return
     query = (
-        f"INSERT IGNORE INTO {_quote_identifier(config.bn_db)}.Path_BayesNets "
+        f"INSERT IGNORE INTO {quote_identifier(config.bn_db)}.Path_BayesNets "
         "(Rchain, child, parent) VALUES (%s, %s, %s)"
     )
     payload = [(rchain_id, child, parent) for parent, child in edges]
@@ -152,10 +150,10 @@ def _insert_path_edges(connection, config: FBConfig, rchain_id: str, edges: list
 
 def _delete_forbidden_path_edges(connection, config: FBConfig, rchain_id: str) -> None:
     query = (
-        f"DELETE FROM {_quote_identifier(config.bn_db)}.Path_BayesNets "
+        f"DELETE FROM {quote_identifier(config.bn_db)}.Path_BayesNets "
         "WHERE Rchain = %s "
         "AND (child, parent) IN ("
-        f"  SELECT child, parent FROM {_quote_identifier(config.bn_db)}.Path_Forbidden_Edges "
+        f"  SELECT child, parent FROM {quote_identifier(config.bn_db)}.Path_Forbidden_Edges "
         "  WHERE Rchain = %s"
         ")"
     )
@@ -170,7 +168,7 @@ def _learn_entity_bayesnets(
     jar_path: Path,
     temp_dir: Path,
 ) -> None:
-    pvariables_query = f"SELECT pvid FROM {_quote_identifier(config.bn_db)}.PVariables ORDER BY pvid"
+    pvariables_query = f"SELECT pvid FROM {quote_identifier(config.bn_db)}.PVariables ORDER BY pvid"
 
     with connection.cursor() as cursor:
         cursor.execute(pvariables_query)
@@ -204,8 +202,8 @@ def _learn_entity_bayesnets(
 
         single_node_query = (
             "SELECT nodes.`1nid` "
-            f"FROM {_quote_identifier(config.bn_db)}.`1Nodes` AS nodes, "
-            f"{_quote_identifier(config.setup_db)}.`EntityTables` AS entity_tables "
+            f"FROM {quote_identifier(config.bn_db)}.`1Nodes` AS nodes, "
+            f"{quote_identifier(config.setup_db)}.`EntityTables` AS entity_tables "
             "WHERE nodes.pvid = CONCAT(entity_tables.Table_name, '0') "
             "AND nodes.pvid = %s"
         )
@@ -218,7 +216,7 @@ def _learn_entity_bayesnets(
 
 
 def _get_lattice_height(connection, config: FBConfig) -> int:
-    query = f"SELECT COALESCE(MAX(length), 0) FROM {_quote_identifier(config.bn_db)}.lattice_set"
+    query = f"SELECT COALESCE(MAX(length), 0) FROM {quote_identifier(config.bn_db)}.lattice_set"
     with connection.cursor() as cursor:
         cursor.execute(query)
         row = cursor.fetchone()
@@ -227,7 +225,7 @@ def _get_lattice_height(connection, config: FBConfig) -> int:
 
 def _get_rchain_ids_for_length(connection, config: FBConfig, length: int) -> list[str]:
     query = (
-        f"SELECT name FROM {_quote_identifier(config.bn_db)}.lattice_set "
+        f"SELECT name FROM {quote_identifier(config.bn_db)}.lattice_set "
         "WHERE length = %s ORDER BY name"
     )
     with connection.cursor() as cursor:
@@ -246,7 +244,7 @@ def _fetch_guidance_edges(
         return []
     placeholders = ", ".join(["%s"] * len(rchain_ids))
     query = (
-        f"SELECT parent, child FROM {_quote_identifier(config.bn_db)}.{_quote_identifier(table_name)} "
+        f"SELECT parent, child FROM {quote_identifier(config.bn_db)}.{quote_identifier(table_name)} "
         f"WHERE Rchain IN ({placeholders})"
     )
     with connection.cursor() as cursor:
@@ -257,7 +255,7 @@ def _fetch_guidance_edges(
 
 def _get_short_rnid(connection, config: FBConfig, rchain_id: str) -> str:
     query = (
-        f"SELECT short_rnid FROM {_quote_identifier(config.bn_db)}.lattice_mapping "
+        f"SELECT short_rnid FROM {quote_identifier(config.bn_db)}.lattice_mapping "
         "WHERE orig_rnid = %s"
     )
     with connection.cursor() as cursor:
@@ -269,7 +267,7 @@ def _get_short_rnid(connection, config: FBConfig, rchain_id: str) -> str:
 
 
 def _link_analysis_off_specific_propagation(connection, config: FBConfig, height: int) -> None:
-    setup_db = _quote_identifier(config.setup_db)
+    setup_db = quote_identifier(config.setup_db)
     queries = [
         (
             "INSERT IGNORE INTO InheritedEdges "
@@ -311,7 +309,7 @@ def _link_analysis_off_specific_propagation(connection, config: FBConfig, height
 
 
 def _propagate_edge_information(connection, config: FBConfig, height: int) -> None:
-    setup_db = _quote_identifier(config.setup_db)
+    setup_db = quote_identifier(config.setup_db)
 
     queries = [
         (
@@ -376,7 +374,7 @@ def _propagate_edge_information(connection, config: FBConfig, height: int) -> No
 
 
 def _propagate_context_edges(connection, config: FBConfig, max_number_of_members: int) -> None:
-    setup_db = _quote_identifier(config.setup_db)
+    setup_db = quote_identifier(config.setup_db)
     with connection.cursor() as cursor:
         cursor.execute("DROP TABLE IF EXISTS RNodeEdges")
         cursor.execute("CREATE TABLE RNodeEdges LIKE Path_BayesNets")
@@ -447,20 +445,6 @@ def _insert_missing_fids_as_children(connection, largest_rchain: str) -> None:
     )
     with connection.cursor() as cursor:
         cursor.execute(query, (largest_rchain, largest_rchain))
-    connection.commit()
-
-
-def _create_final_path_bayesnets(connection, largest_rchain: str) -> None:
-    with connection.cursor() as cursor:
-        cursor.execute("DROP TABLE IF EXISTS Final_Path_BayesNets")
-        cursor.execute(
-            "CREATE TABLE Final_Path_BayesNets "
-            "(SELECT * FROM Path_BayesNets WHERE Rchain = %s AND parent <> '')",
-            (largest_rchain,),
-        )
-        cursor.execute(
-            "ALTER TABLE Final_Path_BayesNets ADD PRIMARY KEY (Rchain, child, parent)"
-        )
     connection.commit()
 
 
@@ -553,6 +537,11 @@ def run_factorbase_counterpart(
         largest_rchain = str(row[0])
 
         _insert_missing_fids_as_children(connection, largest_rchain)
-        _create_final_path_bayesnets(connection, largest_rchain)
+        create_final_path_bayesnets(connection, largest_rchain)
+        export_structure_bifs(connection, config, max_height)
+
+        if not config.continuous and not config.skip_parameter_learning:
+            run_parameter_learning(connection, config)
+            generate_parameter_bif(connection, config)
     finally:
         connection.close()
