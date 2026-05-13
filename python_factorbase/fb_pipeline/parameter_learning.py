@@ -5,7 +5,7 @@ from itertools import product
 from typing import Iterable, Sequence
 
 from .config import FBConfig
-from .db import quote_identifier
+from .db import normalize_identifier_text, quote_identifier
 
 
 @dataclass(frozen=True)
@@ -50,7 +50,10 @@ def get_largest_rchain_info(connection) -> LargestRChainInfo:
         row = cursor.fetchone()
     if row is None:
         raise RuntimeError("Unable to determine the largest relationship chain.")
-    return LargestRChainInfo(rchain=str(row[1]), short_rchain=str(row[0]))
+    return LargestRChainInfo(
+        rchain=str(row[1]),
+        short_rchain=normalize_identifier_text(row[0]),
+    )
 
 
 def _run_cp_generator(connection, config: FBConfig) -> None:
@@ -1005,7 +1008,7 @@ def _supporting_table_for_node(connection, node_name: str) -> str | None:
             "SELECT short_rnid FROM RNodes_inFamily_view WHERE child = %s ORDER BY short_rnid",
             (node_name,),
         )
-        short_rnids = [str(row[0]) for row in cursor.fetchall()]
+        short_rnids = [normalize_identifier_text(row[0]) for row in cursor.fetchall()]
         if short_rnids:
             return f"{','.join(short_rnids)}_CT"
 

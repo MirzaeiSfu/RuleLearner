@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from .config import FBConfig
-from .db import quote_identifier
+from .db import normalize_identifier_text, quote_identifier
 
 
 STRUCTURE_BIF_HEADER = """<?xml version="1.0"?>
@@ -153,7 +153,10 @@ def generate_parameter_bif(
 
     with connection.cursor() as cursor:
         cursor.execute("SELECT short_rnid, orig_rnid FROM lattice_mapping")
-        name_mapping = {str(row[0]): str(row[1]) for row in cursor.fetchall()}
+        name_mapping = {
+            normalize_identifier_text(row[0]): str(row[1])
+            for row in cursor.fetchall()
+        }
         cursor.execute("SELECT DISTINCT child FROM Path_BayesNets")
         variables = [str(row[0]) for row in cursor.fetchall()]
         cursor.execute(

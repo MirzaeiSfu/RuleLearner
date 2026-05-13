@@ -7,8 +7,8 @@ from pathlib import Path
 from .bn_client import run_bn_learner
 from .bif_export import create_final_path_bayesnets, export_structure_bifs, generate_parameter_bif
 from .config import FBConfig
-from .db import connect, quote_identifier, use_database
-from .fmt_pipeline import FMTPipeline
+from .db import connect, normalize_identifier_text, quote_identifier, use_database
+from .lattice_ct_pipeline import build_ct, build_global_lattice
 from .parameter_learning import run_parameter_learning
 from .setup_pipeline import SetupPipeline
 from .sql_runner import execute_sql_script
@@ -263,7 +263,7 @@ def _get_short_rnid(connection, config: FBConfig, rchain_id: str) -> str:
         row = cursor.fetchone()
     if row is None:
         raise RuntimeError(f"No short_rnid found for rchain '{rchain_id}'.")
-    return str(row[0])
+    return normalize_identifier_text(row[0])
 
 
 def _link_analysis_off_specific_propagation(connection, config: FBConfig, height: int) -> None:
@@ -508,7 +508,8 @@ def run_factorbase_counterpart(
             drop_run_metadata=drop_run_metadata,
         ).run()
 
-    FMTPipeline(config).run()
+    build_global_lattice(config)
+    build_ct(config)
 
     connection = connect(config, database=config.bn_db)
     try:

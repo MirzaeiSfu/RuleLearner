@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 from typing import TYPE_CHECKING, Any, Optional
 
 from .config import FBConfig
@@ -16,6 +17,42 @@ class SourceSchemaError(RuntimeError):
 
 def quote_identifier(identifier: str) -> str:
     return "`" + identifier.replace("`", "``") + "`"
+
+
+def normalize_identifier_text(value: object) -> str:
+    if isinstance(value, bytes):
+        try:
+            return value.decode("utf-8")
+        except UnicodeDecodeError:
+            return value.decode("latin1")
+
+    text = str(value)
+    if not text:
+        return text
+
+    parts = text.split(",")
+    normalized_parts: list[str] = []
+    for part in parts:
+        stripped = part.strip()
+        if (
+            len(stripped) >= 4
+            and stripped[0] == "b"
+            and stripped[1] in {"'", '"'}
+            and stripped[-1] == stripped[1]
+        ):
+            try:
+                literal = ast.literal_eval(stripped)
+            except (SyntaxError, ValueError):
+                normalized_parts.append(stripped)
+                continue
+            if isinstance(literal, (bytes, bytearray)):
+                try:
+                    normalized_parts.append(bytes(literal).decode("utf-8"))
+                except UnicodeDecodeError:
+                    normalized_parts.append(bytes(literal).decode("latin1"))
+                continue
+        normalized_parts.append(stripped)
+    return ",".join(normalized_parts)
 
 
 def connect(config: FBConfig, database: Optional[str] = None) -> MySQLConnection:
