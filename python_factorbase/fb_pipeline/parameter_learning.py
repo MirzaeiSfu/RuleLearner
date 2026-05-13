@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from itertools import product
 from typing import Iterable, Sequence
 
 from .config import FBConfig
@@ -626,10 +625,10 @@ def _smoothed_cp(connection, rchain: str) -> None:
             row = cursor.fetchone()
             total = int(row[0]) if row and row[0] is not None else 0
             cursor.execute(f"UPDATE {escaped_smoothed} SET CP = MULT / %s", (total or 1,))
-            cursor.execute(f"SELECT {node_identifier} FROM {escaped_smoothed} LIMIT 1")
-            cv_row = cursor.fetchone()
-            if cv_row is not None:
-                cv = "" if cv_row[0] is None else str(cv_row[0])
+            cursor.execute(f"SELECT {node_identifier} FROM {escaped_smoothed}")
+            candidate_rows = cursor.fetchall()
+            if candidate_rows:
+                cv = "" if candidate_rows[0][0] is None else str(candidate_rows[0][0])
                 cursor.execute(
                     f"SELECT SUM(CP) FROM {escaped_smoothed} WHERE {node_identifier} <> %s",
                     (cv,),
@@ -680,20 +679,17 @@ def _new_table_smoothed(connection, table_name: str) -> None:
             f"INSERT INTO {escaped_smoothed} (MULT, {selected_columns}) "
             f"SELECT MULT, {selected_columns} FROM {escaped_original}"
         )
+        cursor.execute(
+            f"INSERT INTO {escaped_smoothed} (MULT, {selected_columns}) ("
+            + _difference_query(
+                f"MULT, {selected_columns}",
+                base_columns,
+                quote_identifier(f"{table_name}_pairs"),
+                escaped_original,
+            )
+            + ")"
+        )
     connection.commit()
-
-    existing = set(_fetch_rows(connection, f"SELECT {selected_columns} FROM {escaped_original}"))
-    value_lists = [_distinct_column_values(connection, table_name, column) for column in base_columns]
-    missing_rows: list[tuple[object, ...]] = []
-    for combination in product(*value_lists):
-        if tuple(combination) in existing:
-            continue
-        missing_rows.append((0, *combination))
-        if len(missing_rows) >= 1000:
-            _insert_missing_pairs(connection, smoothed_table, base_columns, missing_rows)
-            missing_rows = []
-    if missing_rows:
-        _insert_missing_pairs(connection, smoothed_table, base_columns, missing_rows)
 
     with connection.cursor() as cursor:
         cursor.execute(f"UPDATE {escaped_smoothed} SET MULT = MULT + 1")
@@ -710,6 +706,21 @@ def _populate_pairs_table(connection, table_name: str, base_columns: list[str]) 
         index_columns = ", ".join(["MULT ASC"] + [f"{quote_identifier(column)} ASC" for column in base_columns])
         cursor.execute(f"ALTER TABLE {escaped_pairs} ADD INDEX {escaped_pairs}({index_columns})")
     connection.commit()
+
+    if not base_columns:
+        return
+
+    value_lists = [_distinct_column_values(connection, table_name, column) for column in base_columns]
+    pair_rows: list[tuple[object, ...]] = [(0, value) for value in value_lists[0]]
+    for values in value_lists[1:]:
+        next_rows: list[tuple[object, ...]] = []
+        for existing_row in pair_rows:
+            for value in values:
+                next_rows.append((*existing_row, value))
+        pair_rows = next_rows
+
+    if pair_rows:
+        _insert_missing_pairs(connection, f"{table_name}_pairs", base_columns, pair_rows)
 
 
 def _insert_missing_pairs(
@@ -774,13 +785,13 @@ def _update_parent_sums(connection, smoothed_table: str, base_columns: list[str]
                 f"SELECT DISTINCT {child_identifier} "
                 f"FROM {escaped_smoothed} "
                 f"WHERE {where_clause} "
-                f"ORDER BY CP DESC LIMIT 1",
+                f"ORDER BY CP DESC",
                 tuple(params),
             )
-            cv_row = cursor.fetchone()
-            if cv_row is None:
+            candidate_rows = cursor.fetchall()
+            if not candidate_rows:
                 continue
-            cv = cv_row[0]
+            cv = candidate_rows[0][0]
             cursor.execute(
                 f"SELECT SUM(CP) FROM {escaped_smoothed} "
                 f"WHERE {where_clause} AND {child_identifier} <> %s",
@@ -1086,6 +1097,24 @@ def _cp_pair_columns(connection, table_name: str) -> list[str]:
 def _cp_smoothed_parent_columns(connection, table_name: str) -> list[str]:
     trimmed = _cp_smoothed_index_columns(_table_columns(connection, table_name))
     return trimmed[2:]
+
+
+def _difference_query(
+    columns_a: str,
+    join_columns: list[str],
+    table_a: str,
+    table_b: str,
+) -> str:
+    conditions = []
+    for column in join_columns:
+        escaped = quote_identifier(column)
+        conditions.append(
+            f"({table_a}.{escaped} = {table_b}.{escaped} OR {table_a}.{escaped} IS NULL AND {table_b}.{escaped} IS NULL)"
+        )
+    return (
+        f"SELECT {columns_a} FROM {table_a} "
+        f"WHERE NOT EXISTS (SELECT NULL FROM {table_b} WHERE {' AND '.join(conditions)})"
+    )
 
 
 def _distinct_column_values(connection, table_name: str, column_name: str) -> list[object]:
