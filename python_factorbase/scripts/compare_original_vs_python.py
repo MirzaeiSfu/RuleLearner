@@ -12,6 +12,7 @@ DEFAULT_PORT = 3306
 DEFAULT_USER = "fbuser"
 DEFAULT_PASSWORD = ""
 GENERATED_SCHEMA_SUFFIXES = ("_setup", "_BN", "_CT", "_CT_cache", "_global_counts")
+DEFAULT_FUNCTIONAL_IGNORE_TABLES = ("CallLogs",)
 
 
 def connect(host: str, port: int, user: str, password: str, database: str | None = None):
@@ -117,7 +118,12 @@ def fetch_content_hash(
     return digest.hexdigest()
 
 
-def compare_schema(connection, baseline_schema: str, python_schema: str) -> dict[str, object]:
+def compare_schema(
+    connection,
+    baseline_schema: str,
+    python_schema: str,
+    ignored_tables: set[str],
+) -> dict[str, object]:
     baseline_exists = schema_exists(connection, baseline_schema)
     python_exists = schema_exists(connection, python_schema)
     result: dict[str, object] = {
@@ -125,6 +131,7 @@ def compare_schema(connection, baseline_schema: str, python_schema: str) -> dict
         "python_schema": python_schema,
         "baseline_exists": baseline_exists,
         "python_exists": python_exists,
+        "ignored_tables": sorted(ignored_tables),
     }
 
     if not baseline_exists or not python_exists:
@@ -133,8 +140,12 @@ def compare_schema(connection, baseline_schema: str, python_schema: str) -> dict
 
     baseline_objects = fetch_schema_objects(connection, baseline_schema)
     python_objects = fetch_schema_objects(connection, python_schema)
-    baseline_names = set(baseline_objects)
-    python_names = set(python_objects)
+    baseline_names_all = set(baseline_objects)
+    python_names_all = set(python_objects)
+    baseline_ignored = sorted(baseline_names_all & ignored_tables)
+    python_ignored = sorted(python_names_all & ignored_tables)
+    baseline_names = {name for name in baseline_names_all if name not in ignored_tables}
+    python_names = {name for name in python_names_all if name not in ignored_tables}
     common_names = sorted(baseline_names & python_names)
 
     object_diffs: list[dict[str, object]] = []
@@ -190,6 +201,10 @@ def compare_schema(connection, baseline_schema: str, python_schema: str) -> dict
 
     result["baseline_object_count"] = len(baseline_objects)
     result["python_object_count"] = len(python_objects)
+    result["baseline_compared_object_count"] = len(baseline_names)
+    result["python_compared_object_count"] = len(python_names)
+    result["ignored_in_baseline"] = baseline_ignored
+    result["ignored_in_python"] = python_ignored
     result["only_in_baseline"] = sorted(baseline_names - python_names)
     result["only_in_python"] = sorted(python_names - baseline_names)
     result["object_diffs"] = object_diffs
@@ -270,6 +285,8 @@ def build_report(
     workdir: Path,
     baseline_dbname: str,
     python_dbname: str,
+    ignored_tables: set[str],
+    mode_name: str,
 ) -> dict[str, object]:
     schema_reports = []
     for suffix in GENERATED_SCHEMA_SUFFIXES:
@@ -278,33 +295,55 @@ def build_report(
                 connection,
                 f"{baseline_dbname}{suffix}",
                 f"{python_dbname}{suffix}",
+                ignored_tables,
             )
         )
 
     artifact_report = compare_artifacts(workdir, baseline_dbname, python_dbname)
     overall_equal = all(schema_report["equal"] for schema_report in schema_reports) and artifact_report["equal"]
     return {
+        "mode": mode_name,
         "baseline_dbname": baseline_dbname,
         "python_dbname": python_dbname,
         "generated_schema_suffixes": list(GENERATED_SCHEMA_SUFFIXES),
+        "ignored_tables": sorted(ignored_tables),
         "schemas": schema_reports,
         "artifacts": artifact_report,
         "equal": overall_equal,
     }
 
 
-def build_summary_lines(report: dict[str, object], host: str, port: int, user: str, outdir: Path) -> list[str]:
+def build_summary_lines(
+    strict_report: dict[str, object],
+    functional_report: dict[str, object],
+    active_report: dict[str, object],
+    host: str,
+    port: int,
+    user: str,
+    outdir: Path,
+) -> list[str]:
     lines = [
-        f"Baseline dbname: {report['baseline_dbname']}",
-        f"Python dbname: {report['python_dbname']}",
+        f"Baseline dbname: {active_report['baseline_dbname']}",
+        f"Python dbname: {active_report['python_dbname']}",
         f"MySQL endpoint: {host}:{port}",
         f"MySQL user: {user}",
-        f"Overall equal: {report['equal']}",
+        f"Strict equal: {strict_report['equal']}",
+        (
+            "Functional equal: "
+            f"{functional_report['equal']} "
+            f"(ignored tables: {', '.join(functional_report['ignored_tables']) or 'none'})"
+        ),
+        (
+            "Active mode: "
+            f"{active_report['mode']} "
+            f"(active equal: {active_report['equal']}, "
+            f"ignored tables: {', '.join(active_report['ignored_tables']) or 'none'})"
+        ),
         "",
         "Schema comparison:",
     ]
 
-    for schema_report in report["schemas"]:
+    for schema_report in active_report["schemas"]:
         baseline_schema = schema_report["baseline_schema"]
         python_schema = schema_report["python_schema"]
         lines.append(
@@ -316,12 +355,16 @@ def build_summary_lines(report: dict[str, object], host: str, port: int, user: s
             lines.append(
                 f"  object_count baseline={schema_report['baseline_object_count']}, "
                 f"python={schema_report['python_object_count']}, "
+                f"compared baseline={schema_report['baseline_compared_object_count']}, "
+                f"python={schema_report['python_compared_object_count']}, "
+                f"ignored baseline={len(schema_report['ignored_in_baseline'])}, "
+                f"python={len(schema_report['ignored_in_python'])}, "
                 f"only_in_baseline={len(schema_report['only_in_baseline'])}, "
                 f"only_in_python={len(schema_report['only_in_python'])}, "
                 f"mismatched_objects={len(schema_report['object_diffs'])}"
             )
 
-    artifact_report = report["artifacts"]
+    artifact_report = active_report["artifacts"]
     lines.extend(
         [
             "",
@@ -338,7 +381,7 @@ def build_summary_lines(report: dict[str, object], host: str, port: int, user: s
     )
 
     mismatch_samples: list[str] = []
-    for schema_report in report["schemas"]:
+    for schema_report in active_report["schemas"]:
         for object_name in schema_report.get("only_in_baseline", [])[:3]:
             mismatch_samples.append(
                 f"only in baseline schema {schema_report['baseline_schema']}: {object_name}"
@@ -389,24 +432,69 @@ def main() -> None:
     parser.add_argument("--password", default=DEFAULT_PASSWORD)
     parser.add_argument("--workdir", type=Path, default=Path("."))
     parser.add_argument("--outdir", type=Path, default=Path("compare_runs/latest"))
+    parser.add_argument(
+        "--mode",
+        choices=("strict", "functional"),
+        default="strict",
+        help="Comparison mode for the summary verdict. Strict compares everything. Functional ignores selected metadata tables.",
+    )
+    parser.add_argument(
+        "--ignore-table",
+        action="append",
+        default=[],
+        help="Extra table/view name to ignore in functional mode. May be passed multiple times.",
+    )
     args = parser.parse_args()
 
     workdir = args.workdir.resolve()
     outdir = (workdir / args.outdir).resolve()
     outdir.mkdir(parents=True, exist_ok=True)
 
+    extra_ignored_tables = set(args.ignore_table)
+    functional_ignored_tables = set(DEFAULT_FUNCTIONAL_IGNORE_TABLES) | extra_ignored_tables
+
     with connect(args.host, args.port, args.user, args.password) as connection:
-        report = build_report(
+        strict_report = build_report(
             connection=connection,
             workdir=workdir,
             baseline_dbname=args.baseline_dbname,
             python_dbname=args.python_dbname,
+            ignored_tables=set(),
+            mode_name="strict",
         )
+        functional_report = build_report(
+            connection=connection,
+            workdir=workdir,
+            baseline_dbname=args.baseline_dbname,
+            python_dbname=args.python_dbname,
+            ignored_tables=functional_ignored_tables,
+            mode_name="functional",
+        )
+
+    active_report = strict_report if args.mode == "strict" else functional_report
+    report = {
+        "baseline_dbname": args.baseline_dbname,
+        "python_dbname": args.python_dbname,
+        "active_mode": args.mode,
+        "default_functional_ignored_tables": list(DEFAULT_FUNCTIONAL_IGNORE_TABLES),
+        "extra_ignored_tables": sorted(extra_ignored_tables),
+        "strict": strict_report,
+        "functional": functional_report,
+        "active": active_report,
+    }
 
     detail_path = outdir / "details.json"
     detail_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
-    summary_lines = build_summary_lines(report, args.host, args.port, args.user, outdir)
+    summary_lines = build_summary_lines(
+        strict_report,
+        functional_report,
+        active_report,
+        args.host,
+        args.port,
+        args.user,
+        outdir,
+    )
     summary_path = outdir / "summary.txt"
     summary_path.write_text("\n".join(summary_lines) + "\n", encoding="utf-8")
     print("\n".join(summary_lines))
