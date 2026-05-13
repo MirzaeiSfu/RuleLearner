@@ -97,24 +97,48 @@ def _serialize_value(value: object) -> str:
     return f"{type(value).__name__}:{value}"
 
 
+def _canonicalize_db_text(text: str, baseline_dbname: str, python_dbname: str) -> str:
+    normalized = text
+    for dbname in sorted({baseline_dbname, python_dbname}, key=len, reverse=True):
+        normalized = normalized.replace(dbname, "<DBNAME>")
+    return normalized
+
+
+def _canonicalize_db_value(value: object, baseline_dbname: str, python_dbname: str) -> object:
+    if isinstance(value, bytes):
+        try:
+            return _canonicalize_db_text(value.decode("utf-8"), baseline_dbname, python_dbname)
+        except UnicodeDecodeError:
+            return value
+    if isinstance(value, str):
+        return _canonicalize_db_text(value, baseline_dbname, python_dbname)
+    return value
+
+
 def fetch_content_hash(
     connection,
     schema_name: str,
     object_name: str,
     columns: list[dict[str, str]],
+    baseline_dbname: str,
+    python_dbname: str,
 ) -> str:
     digest = hashlib.sha256()
     query = f"SELECT * FROM {quote_identifier(schema_name)}.{quote_identifier(object_name)}"
-    if columns:
-        order_by = ", ".join(quote_identifier(column["name"]) for column in columns)
-        query += f" ORDER BY {order_by}"
 
+    serialized_rows: list[str] = []
     with connection.cursor() as cursor:
         cursor.execute(query)
         for row in cursor:
-            serialized_row = "\x1f".join(_serialize_value(value) for value in row)
-            digest.update(serialized_row.encode("utf-8"))
-            digest.update(b"\x1e")
+            canonical_row = [
+                _canonicalize_db_value(value, baseline_dbname, python_dbname) for value in row
+            ]
+            serialized_row = "\x1f".join(_serialize_value(value) for value in canonical_row)
+            serialized_rows.append(serialized_row)
+
+    for serialized_row in sorted(serialized_rows):
+        digest.update(serialized_row.encode("utf-8"))
+        digest.update(b"\x1e")
     return digest.hexdigest()
 
 
@@ -123,6 +147,8 @@ def compare_schema(
     baseline_schema: str,
     python_schema: str,
     ignored_tables: set[str],
+    baseline_dbname: str,
+    python_dbname: str,
 ) -> dict[str, object]:
     baseline_exists = schema_exists(connection, baseline_schema)
     python_exists = schema_exists(connection, python_schema)
@@ -166,12 +192,16 @@ def compare_schema(
                 baseline_schema,
                 object_name,
                 baseline_columns,
+                baseline_dbname,
+                python_dbname,
             )
             content_hash_python = fetch_content_hash(
                 connection,
                 python_schema,
                 object_name,
                 python_columns,
+                baseline_dbname,
+                python_dbname,
             )
             content_equal = content_hash_baseline == content_hash_python
 
@@ -296,6 +326,8 @@ def build_report(
                 f"{baseline_dbname}{suffix}",
                 f"{python_dbname}{suffix}",
                 ignored_tables,
+                baseline_dbname,
+                python_dbname,
             )
         )
 
