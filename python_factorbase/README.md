@@ -27,6 +27,21 @@ So the learner path is the FactorBase-integrated/modified path (SFU wrapper + lo
 2. Step 2 (`fmt`): FMT bootstrap stored procedures in Python.
 3. Step 3 (`bn-learn`): call standalone Java BN learner jar from Python.
 
+## Full counterpart mode (config-driven)
+
+For a jar-like run that reads dataset/db names from `config.cfg` and writes FactorBase-style
+BN tables (`Path_BayesNets`, `Final_Path_BayesNets`), use:
+
+```bash
+python python_factorbase/pyfactorbase.py -Dconfig=config.cfg -jarlearner code/bnrunner/target/bnrunner-1.0-SNAPSHOT.jar
+```
+
+Equivalent CLI subcommand:
+
+```bash
+python python_factorbase/run.py -Dconfig=config.cfg factorbase-counterpart -jarlearner code/bnrunner/target/bnrunner-1.0-SNAPSHOT.jar
+```
+
 ## Install Python dependency
 
 ```bash
@@ -56,6 +71,53 @@ Or:
 
 ```bash
 python python_factorbase/run.py --config config.cfg setup-and-fmt
+```
+
+## Quick parity runner (original Java vs Python flow)
+
+Use this helper to run both flows and print whether outputs match:
+
+```bash
+python python_factorbase/scripts/compare_original_vs_python.py \
+  --baseline-config config.baseline.cfg \
+  --python-config config.python.cfg
+```
+
+The script writes comparison artifacts under:
+
+`compare_runs/latest/`
+
+including `summary.txt`, exported CT TSV files, and learned edge TSV files.
+For the Python-side output, use the full counterpart command (`pyfactorbase.py`) so
+the Python run writes learned structure into:
+`<dbname>_BN.Path_BayesNets` and `<dbname>_BN.Final_Path_BayesNets`.
+
+## 3-line demo (hardcoded unielwin)
+
+This demo is hardcoded for the `unielwin` setup and uses:
+
+- baseline dbname: `unielwin_baseline`
+- python dbname: `unielwin_python`
+- baseline config: `python_factorbase/configs/unielwin_baseline.cfg`
+- python config: `python_factorbase/configs/unielwin_python.cfg`
+
+Before running, make sure:
+
+- both source databases exist: `unielwin_baseline` and `unielwin_python`
+- both configs contain valid local DB credentials
+
+Top-level bash file (exactly 3 command lines):
+
+```bash
+bash python_factorbase/scripts/run_unielwin_3line.sh
+```
+
+Equivalent 3 commands inside that bash file:
+
+```bash
+java -Dconfig=python_factorbase/configs/unielwin_baseline.cfg -jar code/factorbase/target/factorbase-1.0-SNAPSHOT.jar
+python python_factorbase/pyfactorbase.py -Dconfig=python_factorbase/configs/unielwin_python.cfg -jarlearner code/bnrunner/target/bnrunner-1.0-SNAPSHOT.jar
+python python_factorbase/scripts/demo_unielwin_compare.py
 ```
 
 By default, `setup` and `setup-and-fmt` run in GraphVAE-safe mode and drop
@@ -93,6 +155,22 @@ Or run everything in one command (setup + FMT + BN learner):
 python python_factorbase/run.py --config config.cfg setup-and-fmt-and-bn-learn \
   --input-tsv /path/to/input_ct.tsv \
   --output-edges /path/to/output_edges.tsv
+```
+
+Or run setup + FMT + auto-export largest CT + BN learner in one command:
+
+```bash
+python python_factorbase/run.py -Dconfig=config.cfg setup-and-fmt-and-auto-bn-learn \
+  -jarlearner code/bnrunner/target/bnrunner-1.0-SNAPSHOT.jar \
+  --output-edges compare_runs/latest/python_edges.tsv \
+  --ct-tsv compare_runs/latest/python_largest_ct.tsv
+```
+
+For full FactorBase-like structure output in DB tables, prefer:
+
+```bash
+python python_factorbase/run.py -Dconfig=config.cfg factorbase-counterpart \
+  -jarlearner code/bnrunner/target/bnrunner-1.0-SNAPSHOT.jar
 ```
 
 To use another jar path, pass `--jar /path/to/another-bnrunner.jar`.
