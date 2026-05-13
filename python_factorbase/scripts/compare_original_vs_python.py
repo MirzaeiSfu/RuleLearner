@@ -2,333 +2,413 @@
 from __future__ import annotations
 
 import argparse
-import csv
-import subprocess
+import hashlib
+import json
 from pathlib import Path
-from urllib.parse import urlparse
 
 
-def parse_properties(path: Path) -> dict[str, str]:
-    properties: dict[str, str] = {}
-    for raw_line in path.read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        properties[key.strip()] = value.strip()
-    return properties
+DEFAULT_HOST = "127.0.0.1"
+DEFAULT_PORT = 3306
+DEFAULT_USER = "fbuser"
+DEFAULT_PASSWORD = ""
+GENERATED_SCHEMA_SUFFIXES = ("_setup", "_BN", "_CT", "_CT_cache", "_global_counts")
 
 
-def load_config(path: Path) -> dict[str, str]:
-    values = parse_properties(path)
-    dbaddress = values["dbaddress"]
-    parsed = urlparse(dbaddress)
-    return {
-        "host": parsed.hostname or "127.0.0.1",
-        "port": str(parsed.port or 3306),
-        "user": values["dbusername"],
-        "password": values.get("dbpassword", ""),
-        "dbname": values["dbname"],
-    }
-
-
-def connect(cfg: dict[str, str], database: str | None = None):
+def connect(host: str, port: int, user: str, password: str, database: str | None = None):
     import mysql.connector
 
     return mysql.connector.connect(
-        host=cfg["host"],
-        port=int(cfg["port"]),
-        user=cfg["user"],
-        password=cfg["password"],
+        host=host,
+        port=port,
+        user=user,
+        password=password,
         database=database,
         autocommit=True,
     )
-
-
-def run_command(command: list[str], cwd: Path) -> None:
-    print("+", " ".join(command))
-    subprocess.run(command, cwd=cwd, check=True)
 
 
 def quote_identifier(identifier: str) -> str:
     return "`" + identifier.replace("`", "``") + "`"
 
 
-def get_ct_table_count(connection, ct_schema: str) -> int:
+def schema_exists(connection, schema_name: str) -> bool:
     with connection.cursor() as cursor:
         cursor.execute(
             """
             SELECT COUNT(*)
+            FROM information_schema.schemata
+            WHERE schema_name = %s
+            """,
+            (schema_name,),
+        )
+        row = cursor.fetchone()
+    return bool(row and int(row[0]) > 0)
+
+
+def fetch_schema_objects(connection, schema_name: str) -> dict[str, str]:
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT table_name, table_type
             FROM information_schema.tables
             WHERE table_schema = %s
+            ORDER BY table_name
             """,
-            (ct_schema,),
+            (schema_name,),
         )
+        return {str(name): str(table_type) for name, table_type in cursor.fetchall()}
+
+
+def fetch_columns(connection, schema_name: str, object_name: str) -> list[dict[str, str]]:
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT column_name, column_type, is_nullable
+            FROM information_schema.columns
+            WHERE table_schema = %s AND table_name = %s
+            ORDER BY ordinal_position
+            """,
+            (schema_name, object_name),
+        )
+        return [
+            {
+                "name": str(column_name),
+                "type": str(column_type),
+                "nullable": str(is_nullable),
+            }
+            for column_name, column_type, is_nullable in cursor.fetchall()
+        ]
+
+
+def fetch_row_count(connection, schema_name: str, object_name: str) -> int:
+    query = f"SELECT COUNT(*) FROM {quote_identifier(schema_name)}.{quote_identifier(object_name)}"
+    with connection.cursor() as cursor:
+        cursor.execute(query)
         row = cursor.fetchone()
     return int(row[0]) if row is not None else 0
 
 
-def get_largest_short_rchain(connection, bn_schema: str) -> str:
-    query = (
-        "SELECT lm.short_rnid "
-        f"FROM {quote_identifier(bn_schema)}.lattice_set ls "
-        f"JOIN {quote_identifier(bn_schema)}.lattice_mapping lm "
-        "  ON lm.orig_rnid = ls.name "
-        "WHERE ls.length = ("
-        f"  SELECT MAX(length) FROM {quote_identifier(bn_schema)}.lattice_set"
-        ") "
-        "ORDER BY lm.short_rnid "
-        "LIMIT 1"
-    )
-    with connection.cursor() as cursor:
-        cursor.execute(query)
-        row = cursor.fetchone()
-    if row is None:
-        raise RuntimeError(f"No lattice mapping rows found in schema '{bn_schema}'.")
-    return str(row[0])
+def _serialize_value(value: object) -> str:
+    if value is None:
+        return "null:"
+    if isinstance(value, bytes):
+        return "bytes:" + value.hex()
+    return f"{type(value).__name__}:{value}"
 
 
-def export_table_to_tsv(
+def fetch_content_hash(
     connection,
     schema_name: str,
-    table_name: str,
-    output_tsv: Path,
-    where_clause: str | None = None,
-) -> None:
-    output_tsv.parent.mkdir(parents=True, exist_ok=True)
-    query = f"SELECT * FROM {quote_identifier(schema_name)}.{quote_identifier(table_name)}"
-    if where_clause:
-        query += f" WHERE {where_clause}"
+    object_name: str,
+    columns: list[dict[str, str]],
+) -> str:
+    digest = hashlib.sha256()
+    query = f"SELECT * FROM {quote_identifier(schema_name)}.{quote_identifier(object_name)}"
+    if columns:
+        order_by = ", ".join(quote_identifier(column["name"]) for column in columns)
+        query += f" ORDER BY {order_by}"
 
     with connection.cursor() as cursor:
         cursor.execute(query)
-        headers = [column[0] for column in cursor.description]
-        with output_tsv.open("w", encoding="utf-8", newline="") as handle:
-            writer = csv.writer(handle, delimiter="\t")
-            writer.writerow(headers)
-            for row in cursor:
-                writer.writerow(["" if value is None else value for value in row])
+        for row in cursor:
+            serialized_row = "\x1f".join(_serialize_value(value) for value in row)
+            digest.update(serialized_row.encode("utf-8"))
+            digest.update(b"\x1e")
+    return digest.hexdigest()
 
 
-def export_baseline_final_edges_to_tsv(connection, bn_schema: str, output_tsv: Path) -> None:
-    output_tsv.parent.mkdir(parents=True, exist_ok=True)
-    query = (
-        "SELECT DISTINCT parent, child "
-        f"FROM {quote_identifier(bn_schema)}.Final_Path_BayesNets "
-        "ORDER BY parent, child"
+def compare_schema(connection, baseline_schema: str, python_schema: str) -> dict[str, object]:
+    baseline_exists = schema_exists(connection, baseline_schema)
+    python_exists = schema_exists(connection, python_schema)
+    result: dict[str, object] = {
+        "baseline_schema": baseline_schema,
+        "python_schema": python_schema,
+        "baseline_exists": baseline_exists,
+        "python_exists": python_exists,
+    }
+
+    if not baseline_exists or not python_exists:
+        result["equal"] = baseline_exists == python_exists
+        return result
+
+    baseline_objects = fetch_schema_objects(connection, baseline_schema)
+    python_objects = fetch_schema_objects(connection, python_schema)
+    baseline_names = set(baseline_objects)
+    python_names = set(python_objects)
+    common_names = sorted(baseline_names & python_names)
+
+    object_diffs: list[dict[str, object]] = []
+    for object_name in common_names:
+        baseline_type = baseline_objects[object_name]
+        python_type = python_objects[object_name]
+        baseline_columns = fetch_columns(connection, baseline_schema, object_name)
+        python_columns = fetch_columns(connection, python_schema, object_name)
+        baseline_row_count = fetch_row_count(connection, baseline_schema, object_name)
+        python_row_count = fetch_row_count(connection, python_schema, object_name)
+
+        content_hash_baseline = None
+        content_hash_python = None
+        content_equal = False
+        if baseline_type == python_type and baseline_columns == python_columns:
+            content_hash_baseline = fetch_content_hash(
+                connection,
+                baseline_schema,
+                object_name,
+                baseline_columns,
+            )
+            content_hash_python = fetch_content_hash(
+                connection,
+                python_schema,
+                object_name,
+                python_columns,
+            )
+            content_equal = content_hash_baseline == content_hash_python
+
+        object_diff = {
+            "name": object_name,
+            "baseline_type": baseline_type,
+            "python_type": python_type,
+            "types_equal": baseline_type == python_type,
+            "baseline_columns": baseline_columns,
+            "python_columns": python_columns,
+            "columns_equal": baseline_columns == python_columns,
+            "baseline_row_count": baseline_row_count,
+            "python_row_count": python_row_count,
+            "row_count_equal": baseline_row_count == python_row_count,
+            "baseline_content_hash": content_hash_baseline,
+            "python_content_hash": content_hash_python,
+            "content_equal": content_equal,
+            "equal": (
+                baseline_type == python_type
+                and baseline_columns == python_columns
+                and baseline_row_count == python_row_count
+                and content_equal
+            ),
+        }
+        if not object_diff["equal"]:
+            object_diffs.append(object_diff)
+
+    result["baseline_object_count"] = len(baseline_objects)
+    result["python_object_count"] = len(python_objects)
+    result["only_in_baseline"] = sorted(baseline_names - python_names)
+    result["only_in_python"] = sorted(python_names - baseline_names)
+    result["object_diffs"] = object_diffs
+    result["equal"] = (
+        not result["only_in_baseline"]
+        and not result["only_in_python"]
+        and not object_diffs
     )
-    with connection.cursor() as cursor:
-        cursor.execute(query)
-        with output_tsv.open("w", encoding="utf-8", newline="") as handle:
-            writer = csv.writer(handle, delimiter="\t")
-            writer.writerow(["parent", "child"])
-            for row in cursor:
-                parent = "" if row[0] is None else str(row[0])
-                child = "" if row[1] is None else str(row[1])
-                writer.writerow([parent, child])
+    return result
 
 
-def read_edge_set(path: Path) -> set[tuple[str, str]]:
-    edges: set[tuple[str, str]] = set()
-    with path.open("r", encoding="utf-8") as handle:
-        reader = csv.reader(handle, delimiter="\t")
-        header_skipped = False
-        for row in reader:
-            if not row:
-                continue
-            if not header_skipped:
-                header_skipped = True
-                if row[0].strip().lower() == "parent":
-                    continue
-            if len(row) < 2:
-                continue
-            edges.add((row[0].strip(), row[1].strip()))
-    return edges
+def _canonicalize_artifact_bytes(data: bytes, dbname: str) -> bytes:
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        return data
+    normalized = text.replace("\r\n", "\n").replace(dbname, "<DBNAME>")
+    return normalized.encode("utf-8")
 
 
-def write_summary(summary_path: Path, lines: list[str]) -> None:
-    summary_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+def _artifact_digest(path: Path, dbname: str) -> str:
+    data = path.read_bytes()
+    normalized = _canonicalize_artifact_bytes(data, dbname)
+    return hashlib.sha256(normalized).hexdigest()
+
+
+def collect_artifacts(workdir: Path, dbname: str) -> dict[str, Path]:
+    artifacts: dict[str, Path] = {}
+
+    bif_path = workdir / f"Bif_{dbname}.xml"
+    if bif_path.is_file():
+        artifacts["Bif_<DBNAME>.xml"] = bif_path
+
+    db_dir = workdir / dbname
+    if db_dir.is_dir():
+        for path in sorted(db_dir.rglob("*")):
+            if path.is_file():
+                relative_path = path.relative_to(db_dir).as_posix()
+                artifacts[relative_path] = path
+
+    return artifacts
+
+
+def compare_artifacts(workdir: Path, baseline_dbname: str, python_dbname: str) -> dict[str, object]:
+    baseline_artifacts = collect_artifacts(workdir, baseline_dbname)
+    python_artifacts = collect_artifacts(workdir, python_dbname)
+    baseline_names = set(baseline_artifacts)
+    python_names = set(python_artifacts)
+    common_names = sorted(baseline_names & python_names)
+
+    file_diffs: list[dict[str, object]] = []
+    for relative_name in common_names:
+        baseline_path = baseline_artifacts[relative_name]
+        python_path = python_artifacts[relative_name]
+        baseline_hash = _artifact_digest(baseline_path, baseline_dbname)
+        python_hash = _artifact_digest(python_path, python_dbname)
+        if baseline_hash != python_hash:
+            file_diffs.append(
+                {
+                    "path": relative_name,
+                    "baseline_hash": baseline_hash,
+                    "python_hash": python_hash,
+                }
+            )
+
+    return {
+        "baseline_artifact_count": len(baseline_artifacts),
+        "python_artifact_count": len(python_artifacts),
+        "only_in_baseline": sorted(baseline_names - python_names),
+        "only_in_python": sorted(python_names - baseline_names),
+        "file_diffs": file_diffs,
+        "equal": not file_diffs and not (baseline_names - python_names) and not (python_names - baseline_names),
+    }
+
+
+def build_report(
+    connection,
+    workdir: Path,
+    baseline_dbname: str,
+    python_dbname: str,
+) -> dict[str, object]:
+    schema_reports = []
+    for suffix in GENERATED_SCHEMA_SUFFIXES:
+        schema_reports.append(
+            compare_schema(
+                connection,
+                f"{baseline_dbname}{suffix}",
+                f"{python_dbname}{suffix}",
+            )
+        )
+
+    artifact_report = compare_artifacts(workdir, baseline_dbname, python_dbname)
+    overall_equal = all(schema_report["equal"] for schema_report in schema_reports) and artifact_report["equal"]
+    return {
+        "baseline_dbname": baseline_dbname,
+        "python_dbname": python_dbname,
+        "generated_schema_suffixes": list(GENERATED_SCHEMA_SUFFIXES),
+        "schemas": schema_reports,
+        "artifacts": artifact_report,
+        "equal": overall_equal,
+    }
+
+
+def build_summary_lines(report: dict[str, object], host: str, port: int, user: str, outdir: Path) -> list[str]:
+    lines = [
+        f"Baseline dbname: {report['baseline_dbname']}",
+        f"Python dbname: {report['python_dbname']}",
+        f"MySQL endpoint: {host}:{port}",
+        f"MySQL user: {user}",
+        f"Overall equal: {report['equal']}",
+        "",
+        "Schema comparison:",
+    ]
+
+    for schema_report in report["schemas"]:
+        baseline_schema = schema_report["baseline_schema"]
+        python_schema = schema_report["python_schema"]
+        lines.append(
+            f"- {baseline_schema} vs {python_schema}: equal={schema_report['equal']}, "
+            f"baseline_exists={schema_report['baseline_exists']}, "
+            f"python_exists={schema_report['python_exists']}"
+        )
+        if schema_report["baseline_exists"] and schema_report["python_exists"]:
+            lines.append(
+                f"  object_count baseline={schema_report['baseline_object_count']}, "
+                f"python={schema_report['python_object_count']}, "
+                f"only_in_baseline={len(schema_report['only_in_baseline'])}, "
+                f"only_in_python={len(schema_report['only_in_python'])}, "
+                f"mismatched_objects={len(schema_report['object_diffs'])}"
+            )
+
+    artifact_report = report["artifacts"]
+    lines.extend(
+        [
+            "",
+            "Artifact comparison:",
+            (
+                f"- equal={artifact_report['equal']}, "
+                f"baseline_artifacts={artifact_report['baseline_artifact_count']}, "
+                f"python_artifacts={artifact_report['python_artifact_count']}, "
+                f"only_in_baseline={len(artifact_report['only_in_baseline'])}, "
+                f"only_in_python={len(artifact_report['only_in_python'])}, "
+                f"mismatched_files={len(artifact_report['file_diffs'])}"
+            ),
+        ]
+    )
+
+    mismatch_samples: list[str] = []
+    for schema_report in report["schemas"]:
+        for object_name in schema_report.get("only_in_baseline", [])[:3]:
+            mismatch_samples.append(
+                f"only in baseline schema {schema_report['baseline_schema']}: {object_name}"
+            )
+        for object_name in schema_report.get("only_in_python", [])[:3]:
+            mismatch_samples.append(
+                f"only in python schema {schema_report['python_schema']}: {object_name}"
+            )
+        for object_diff in schema_report.get("object_diffs", [])[:3]:
+            mismatch_samples.append(
+                f"content/shape mismatch in {schema_report['baseline_schema']}::{object_diff['name']}"
+            )
+    for artifact_name in artifact_report["only_in_baseline"][:3]:
+        mismatch_samples.append(f"only in baseline artifacts: {artifact_name}")
+    for artifact_name in artifact_report["only_in_python"][:3]:
+        mismatch_samples.append(f"only in python artifacts: {artifact_name}")
+    for artifact_diff in artifact_report["file_diffs"][:3]:
+        mismatch_samples.append(f"artifact content mismatch: {artifact_diff['path']}")
+
+    if mismatch_samples:
+        lines.append("")
+        lines.append("First mismatches:")
+        for sample in mismatch_samples[:12]:
+            lines.append(f"- {sample}")
+
+    lines.extend(
+        [
+            "",
+            f"Summary written to: {outdir / 'summary.txt'}",
+            f"Detailed report written to: {outdir / 'details.json'}",
+        ]
+    )
+    return lines
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
-            "Run original Java FactorBase and Python FactorBase flow, then compare "
-            "CT counts and learned edges."
+            "Compare generated Java FactorBase and Python FactorBase outputs for two "
+            "already-produced database names, including generated schemas and file artifacts."
         )
     )
-    parser.add_argument("--baseline-config", type=Path, required=True)
-    parser.add_argument("--python-config", type=Path, required=True)
-    parser.add_argument(
-        "--factorbase-jar",
-        type=Path,
-        default=Path("code/factorbase/target/factorbase-1.0-SNAPSHOT.jar"),
-    )
-    parser.add_argument(
-        "--bn-jar",
-        type=Path,
-        default=Path("code/bnrunner/target/bnrunner-1.0-SNAPSHOT.jar"),
-    )
+    parser.add_argument("--baseline-dbname", required=True)
+    parser.add_argument("--python-dbname", required=True)
+    parser.add_argument("--host", default=DEFAULT_HOST)
+    parser.add_argument("--port", type=int, default=DEFAULT_PORT)
+    parser.add_argument("--user", default=DEFAULT_USER)
+    parser.add_argument("--password", default=DEFAULT_PASSWORD)
     parser.add_argument("--workdir", type=Path, default=Path("."))
     parser.add_argument("--outdir", type=Path, default=Path("compare_runs/latest"))
-    parser.add_argument("--java-bin", default="java")
-    parser.add_argument("--python-bin", default="python")
     args = parser.parse_args()
 
     workdir = args.workdir.resolve()
     outdir = (workdir / args.outdir).resolve()
     outdir.mkdir(parents=True, exist_ok=True)
 
-    baseline_config = load_config((workdir / args.baseline_config).resolve())
-    python_config = load_config((workdir / args.python_config).resolve())
-
-    baseline_bn_schema = f"{baseline_config['dbname']}_BN"
-    baseline_ct_schema = f"{baseline_config['dbname']}_CT"
-    python_bn_schema = f"{python_config['dbname']}_BN"
-    python_ct_schema = f"{python_config['dbname']}_CT"
-
-    factorbase_jar = (workdir / args.factorbase_jar).resolve()
-    bn_jar = (workdir / args.bn_jar).resolve()
-    baseline_cfg_path = (workdir / args.baseline_config).resolve()
-    python_cfg_path = (workdir / args.python_config).resolve()
-
-    if not factorbase_jar.exists():
-        raise FileNotFoundError(f"Baseline FactorBase jar not found: {factorbase_jar}")
-    if not bn_jar.exists():
-        raise FileNotFoundError(f"BN learner jar not found: {bn_jar}")
-
-    print("== 1) Run original Java FactorBase ==")
-    run_command(
-        [
-            args.java_bin,
-            f"-Dconfig={baseline_cfg_path}",
-            "-jar",
-            str(factorbase_jar),
-        ],
-        cwd=workdir,
-    )
-
-    print("== 2) Run Python setup + FMT ==")
-    run_command(
-        [
-            args.python_bin,
-            "python_factorbase/run.py",
-            "--config",
-            str(python_cfg_path),
-            "setup-and-fmt",
-        ],
-        cwd=workdir,
-    )
-
-    print("== 3) Export CT tables and baseline final edges ==")
-    baseline_conn = connect(baseline_config)
-    python_conn = connect(python_config)
-    try:
-        baseline_ct_count = get_ct_table_count(baseline_conn, baseline_ct_schema)
-        python_ct_count = get_ct_table_count(python_conn, python_ct_schema)
-
-        baseline_short = get_largest_short_rchain(baseline_conn, baseline_bn_schema)
-        python_short = get_largest_short_rchain(python_conn, python_bn_schema)
-
-        baseline_ct_table = f"{baseline_short}_CT"
-        python_ct_table = f"{python_short}_CT"
-
-        baseline_ct_tsv = outdir / "baseline_largest_ct.tsv"
-        python_ct_tsv = outdir / "python_largest_ct.tsv"
-        baseline_final_edges_tsv = outdir / "baseline_final_edges.tsv"
-
-        export_table_to_tsv(
-            baseline_conn,
-            baseline_ct_schema,
-            baseline_ct_table,
-            baseline_ct_tsv,
-            where_clause="MULT > 0",
+    with connect(args.host, args.port, args.user, args.password) as connection:
+        report = build_report(
+            connection=connection,
+            workdir=workdir,
+            baseline_dbname=args.baseline_dbname,
+            python_dbname=args.python_dbname,
         )
-        export_table_to_tsv(
-            python_conn,
-            python_ct_schema,
-            python_ct_table,
-            python_ct_tsv,
-            where_clause="MULT > 0",
-        )
-        export_baseline_final_edges_to_tsv(
-            baseline_conn,
-            baseline_bn_schema,
-            baseline_final_edges_tsv,
-        )
-    finally:
-        baseline_conn.close()
-        python_conn.close()
 
-    print("== 4) Run BN learner jar on baseline CT TSV ==")
-    baseline_bnlearn_edges = outdir / "baseline_bnlearn_edges.tsv"
-    python_bnlearn_edges = outdir / "python_bnlearn_edges.tsv"
+    detail_path = outdir / "details.json"
+    detail_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
-    run_command(
-        [
-            args.python_bin,
-            "python_factorbase/run.py",
-            "--config",
-            str(python_cfg_path),
-            "bn-learn",
-            "--jar",
-            str(bn_jar),
-            "--input-tsv",
-            str(baseline_ct_tsv),
-            "--output-edges",
-            str(baseline_bnlearn_edges),
-        ],
-        cwd=workdir,
-    )
-
-    print("== 5) Run Python one-shot pipeline (setup + FMT + bn-learn) ==")
-    run_command(
-        [
-            args.python_bin,
-            "python_factorbase/run.py",
-            "--config",
-            str(python_cfg_path),
-            "setup-and-fmt-and-bn-learn",
-            "--jar",
-            str(bn_jar),
-            "--input-tsv",
-            str(python_ct_tsv),
-            "--output-edges",
-            str(python_bnlearn_edges),
-        ],
-        cwd=workdir,
-    )
-
-    print("== 6) Compare results ==")
-    baseline_final_edges = read_edge_set(outdir / "baseline_final_edges.tsv")
-    baseline_bnlearn_set = read_edge_set(outdir / "baseline_bnlearn_edges.tsv")
-    python_bnlearn_set = read_edge_set(outdir / "python_bnlearn_edges.tsv")
-
-    ct_count_same = baseline_ct_count == python_ct_count
-    bnlearn_same = baseline_bnlearn_set == python_bnlearn_set
-    final_vs_python_same = baseline_final_edges == python_bnlearn_set
-
-    summary_lines = [
-        f"Baseline dbname: {baseline_config['dbname']}",
-        f"Python dbname: {python_config['dbname']}",
-        f"Baseline largest short_rnid: {baseline_short}",
-        f"Python largest short_rnid: {python_short}",
-        f"Baseline largest CT table: {baseline_ct_schema}.{baseline_ct_table}",
-        f"Python largest CT table: {python_ct_schema}.{python_ct_table}",
-        f"CT table count baseline: {baseline_ct_count}",
-        f"CT table count python: {python_ct_count}",
-        f"CT table count equal: {ct_count_same}",
-        "",
-        f"Baseline bn-learn edge count: {len(baseline_bnlearn_set)}",
-        f"Python one-shot (setup+fmt+bn-learn) edge count: {len(python_bnlearn_set)}",
-        f"bn-learn edges equal (baseline CT vs python one-shot): {bnlearn_same}",
-        "",
-        f"Baseline Final_Path_BayesNets edge count: {len(baseline_final_edges)}",
-        f"Baseline Final_Path_BayesNets vs python bn-learn equal: {final_vs_python_same}",
-        "",
-        f"Output directory: {outdir}",
-    ]
-    write_summary(outdir / "summary.txt", summary_lines)
+    summary_lines = build_summary_lines(report, args.host, args.port, args.user, outdir)
+    summary_path = outdir / "summary.txt"
+    summary_path.write_text("\n".join(summary_lines) + "\n", encoding="utf-8")
     print("\n".join(summary_lines))
 
 
