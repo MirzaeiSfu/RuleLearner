@@ -65,6 +65,7 @@ def connect(config: FBConfig, database: Optional[str] = None) -> MySQLConnection
         password=config.dbpassword,
         database=database,
         autocommit=False,
+        allow_local_infile=True,
     )
 
 

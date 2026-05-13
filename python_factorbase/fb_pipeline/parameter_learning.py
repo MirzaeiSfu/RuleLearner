@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import tempfile
 from typing import Iterable, Sequence
 
 from .config import FBConfig
@@ -720,7 +721,7 @@ def _populate_pairs_table(connection, table_name: str, base_columns: list[str]) 
         pair_rows = next_rows
 
     if pair_rows:
-        _insert_missing_pairs(connection, f"{table_name}_pairs", base_columns, pair_rows)
+        _load_pairs_rows(connection, f"{table_name}_pairs", pair_rows)
 
 
 def _insert_missing_pairs(
@@ -1129,3 +1130,30 @@ def _fetch_rows(connection, query: str, params: Sequence[object] = ()) -> list[t
     with connection.cursor() as cursor:
         cursor.execute(query, tuple(params))
         return [tuple(row) for row in cursor.fetchall()]
+
+
+def _load_pairs_rows(connection, table_name: str, rows: list[tuple[object, ...]]) -> None:
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        newline="",
+        suffix=".csv",
+        delete=False,
+    ) as handle:
+        temp_path = handle.name
+        for row in rows:
+            serialized = ["0" if index == 0 else ("" if value is None else str(value)) for index, value in enumerate(row)]
+            handle.write(",".join(serialized) + "\n")
+
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                f"LOAD DATA LOCAL INFILE %s INTO TABLE {quote_identifier(table_name)} "
+                "FIELDS TERMINATED BY ',' LINES TERMINATED BY '\\n'",
+                (temp_path,),
+            )
+        connection.commit()
+    finally:
+        from pathlib import Path
+
+        Path(temp_path).unlink(missing_ok=True)
