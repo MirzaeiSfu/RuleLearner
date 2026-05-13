@@ -15,11 +15,14 @@ class LargestRChainInfo:
 
 
 def run_parameter_learning(connection, config: FBConfig) -> LargestRChainInfo:
-    """Port of the Java parameter-learning/KLD/BIF preparation phase."""
-    if config.use_local_ct:
-        raise NotImplementedError(
-            "UseLocal_CT=1 is not supported in the Python counterpart flow yet."
-        )
+    """Port of the Java parameter-learning/KLD/BIF preparation phase.
+
+    The current Java codebase reads UseLocal_CT but does not expose a separate
+    concrete CP/KLD/BIF materialization path in this repository. For Python
+    compatibility we therefore accept UseLocal_CT=1 and run the same BN-schema
+    CP pipeline that Java uses for the fully implemented path, producing the
+    standard `_CP`, `_CP_smoothed`, `Scores`, KLD, and BIF artifacts.
+    """
 
     info = get_largest_rchain_info(connection)
     _run_cp_generator(connection, config)
@@ -398,16 +401,9 @@ def _no_parent_update(
                 f"UPDATE {escaped_table} SET CP = %s WHERE {node_identifier} = %s",
                 (cp_value, value),
             )
-
-            cursor.execute(
-                "SELECT Tuples FROM Pvars_Not_In_Family WHERE child = %s",
-                (node_name,),
-            )
-            local_row = cursor.fetchone()
-            local_mult = numerator if local_row is None else numerator
             cursor.execute(
                 f"UPDATE {escaped_table} SET local_mult = %s WHERE {node_identifier} = %s",
-                (local_mult, value),
+                (numerator, value),
             )
 
         cursor.execute(f"ALTER TABLE {escaped_table} ADD likelihood FLOAT(20,2)")
@@ -522,12 +518,7 @@ def _has_parent_update(
         cursor.execute(f"ALTER TABLE {escaped_table} ADD likelihood FLOAT(20,2)")
         cursor.execute(f"UPDATE {escaped_table} SET CP = MULT / ParentSum")
 
-        cursor.execute("SELECT Tuples FROM Pvars_Not_In_Family WHERE child = %s", (node_name,))
-        has_local = cursor.fetchone() is not None
-        if has_local:
-            cursor.execute(f"UPDATE {escaped_table} SET local_mult = MULT")
-        else:
-            cursor.execute(f"UPDATE {escaped_table} SET local_mult = MULT")
+        cursor.execute(f"UPDATE {escaped_table} SET local_mult = MULT")
 
         cursor.execute(f"UPDATE {escaped_table} SET likelihood = LOG(CP) * local_mult")
         cursor.execute("DROP TABLE IF EXISTS temp")
@@ -780,7 +771,7 @@ def _update_parent_sums(connection, smoothed_table: str, base_columns: list[str]
                 f"SELECT DISTINCT {child_identifier} "
                 f"FROM {escaped_smoothed} "
                 f"WHERE {where_clause} "
-                f"ORDER BY CP DESC",
+                f"ORDER BY CP DESC LIMIT 1",
                 tuple(params),
             )
             cv_row = cursor.fetchone()
